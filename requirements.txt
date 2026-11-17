@@ -1,0 +1,23 @@
+# Invoice agent (JKLU AI Buildathon 2026, PS-09)
+# Direct dependencies only, pinned to the versions the project was built and
+# tested with (Python 3.14). pip installs their sub-dependencies automatically.
+#
+#   pip install -r requirements.txt
+
+# Web app
+streamlit==1.66.1
+
+# AI document reading and the agent (Google Gemini)
+google-genai==2.34.0
+
+# PostgreSQL: approvals, payments, users and the audit log
+psycopg2-binary==2.9.13
+
+# Loads GEMINI_API_KEY and the DB_* settings from .env
+python-dotenv==1.2.4
+
+# Tests (python -m pytest -q)
+pytest==9.2.0
+
+# Word (.docx), Excel (.xlsx) and JSON uploads are read with the Python
+# standard library, so they need no extra packages.

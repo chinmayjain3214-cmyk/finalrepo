@@ -1,0 +1,326 @@
+<div align="center">
+
+# 🧾 Autonomous Accounts Payable & Vendor Invoice Agent
+
+**AI prepares the evidence. Deterministic Python enforces the rules. Humans make the decision.**
+
+*JKLU AI Buildathon 2026 · Problem Statement 09*
+
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-1.66-FF4B4B?logo=streamlit&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)
+![Gemini](https://img.shields.io/badge/Google-Gemini-8E75B2?logo=googlegemini&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-pytest-0A9EDC?logo=pytest&logoColor=white)
+
+</div>
+
+---
+
+## The problem
+
+Accounts payable teams check every vendor invoice by hand against the purchase order (PO), the goods receipt (GRN), the vendor master and the department budget. It is slow, error-prone and leaves little record of *why* an invoice was paid. Duplicate invoices, price hikes, short deliveries and over-budget spending slip through.
+
+The obvious instinct is to point an LLM at the invoice and let it decide. That is risky: a model can be prompt-injected, can hallucinate a PO number, and leaves no reproducible audit trail.
+
+## Our approach
+
+We split the work into four layers of trust:
+
+| Layer | Who does it | Trust level |
+|---|---|---|
+| **1. Read** | Gemini reads the PDF/image and extracts invoice fields and line items. Output is schema-validated. | Untrusted |
+| **2. Check** | `rules.py` runs deterministic checks (arithmetic, vendor, GSTIN, PO, GRN, budget, GST, FX, duplicates) and returns reason codes. No LLM involved. | Trusted, reproducible |
+| **3. Approve** | Three people sign off in sequence: Department Head → Finance Officer → Final Approver. | Trusted, accountable |
+| **4. Pay** | After final approval, a payment schedule is created and the Final Approver pays through a sandbox payment gateway. | Trusted, auditable |
+
+A hallucination stops at Layer 1: the rules engine never trusts it, and no payment can happen without three human approvals.
+
+```mermaid
+flowchart LR
+    V[Vendor uploads invoice] --> A[Gemini extracts fields]
+    A --> R[Deterministic rules engine]
+    R -->|READY_FOR_APPROVAL or<br/>NEEDS_HUMAN_REVIEW + reason codes| D[Department Head]
+    D --> F[Finance Officer]
+    F --> FA[Final Approver]
+    FA --> P[Payment schedule created]
+    P --> G[Sandbox payment gateway]
+    D & F & FA -.reject.-> X[Workflow stops]
+    R & D & F & FA & G --> L[(PostgreSQL audit log)]
+```
+
+---
+
+## Features
+
+### 🤖 AI invoice reading
+- Upload PDF, JPG, PNG or WEBP invoices.
+- Gemini extracts the vendor, invoice number, PO reference, line items, taxes and totals, with retries and fallback models.
+- Field-name normalisation handles real-world variation (`invoice_no`, `invoice_number`, `invoice_id`, …).
+- Content-hash duplicate detection blocks the same document being submitted twice.
+
+### ✅ Deterministic validation (`rules.py`)
+Every check returns a machine-readable reason code:
+
+| Check | Reason codes |
+|---|---|
+| Arithmetic | `INVOICE_ARITHMETIC_MISMATCH` |
+| Vendor identity | `VENDOR_GSTIN_MISMATCH` |
+| PO mapping | `MISSING_PO_REFERENCE`, `PO_REFERENCE_UNMAPPED`, `CANCELLED_PO` |
+| Pricing | `PO_UNIT_PRICE_MISMATCH`, `PRICE_VARIANCE_WITHIN_TOLERANCE` (informational) |
+| Goods receipt | `MISSING_GOODS_RECEIPT`, `GRN_QUANTITY_SHORTAGE` |
+| Over-billing | `DUPLICATE_INVOICE`, `CUMULATIVE_PO_OVERBILL` |
+| Tax and currency | `GST_RATE_MISMATCH`, `FX_RATE_MISMATCH` |
+| Budget | `BUDGET_EXCEEDED` |
+| Special cases | `CREDIT_NOTE_SPECIAL_HANDLING`, `LOW_DOCUMENT_QUALITY`, `INCOMPLETE_EXTRACTION` |
+
+The final recommendation is always one of `READY_FOR_APPROVAL` or `NEEDS_HUMAN_REVIEW`. It is advisory: it never approves anything by itself.
+
+### 👥 Three-stage human approval
+- Sequential Department Head → Finance Officer → Final Approver workflow with row-level locking.
+- Each stage records the reviewer, timestamp, decision and note.
+- A two-step confirmation dialog for every decision.
+- A rejection at any stage ends the workflow immediately.
+
+### 💳 Payment gateway (sandbox)
+- When the Final Approver approves the last stage, a payment schedule is created and a **payment window opens automatically**.
+- Pay by UPI, debit/credit card or net banking.
+- Safeguards:
+  - Only the Final Approver who approved the invoice (or a Finance Officer/Admin) can pay it.
+  - The charged amount must match the scheduled amount.
+  - An invoice cannot be paid twice.
+- Only the last 4 card digits are stored. The full card number and CVV are never saved or logged.
+- Sandbox only: no bank is contacted and no money moves. A failed payment leaves the invoice scheduled and can be retried from the **Payment schedule** tab.
+
+### 📨 Vendor clarification loop
+When an invoice is flagged, the vendor sees a specific "action needed" message in **My submissions** and can acknowledge it before re-uploading.
+
+### 🧾 Procurement records
+Procurement Officers can create purchase orders, mapped to a department for budget checks, and record goods receipts, service confirmations and returns.
+
+**Upload instead of typing.** A procurement officer can upload a photo, scan or PDF of a purchase order or a goods receipt / delivery note. Gemini reads it and fills the existing form; the officer reviews it and still has to generate the preview and save. Python checks the reading first: the vendor, department and currency are only filled when they match the reference lists, a receipt is only attached to a purchase order that is open for receipt, quantities are capped at what is still outstanding, and the line amounts are re-added against the printed subtotal. Anything that does not match is shown as a warning, not guessed. Sample documents are in `demo_test_documents/`.
+
+### 🔍 Audit trail
+Every AI step, rule result, upload, login, decision and payment is written to PostgreSQL. Admins can search and filter the log and export it to CSV.
+
+---
+
+## Roles
+
+| Role | What they can do |
+|---|---|
+| **Vendor** | Upload invoices, view submission status and clarification requests |
+| **Procurement Officer** | Create and track purchase orders and goods receipts |
+| **Department Head** | Approve or reject stage 1 |
+| **Finance Officer** | Approve or reject stage 2; process or cancel scheduled payments |
+| **Final Approver** | Approve or reject stage 3; pay approved invoices through the gateway |
+| **Admin** | Approvals, finance workspace (budgets and payments) and the audit log |
+
+Passwords are hashed with PBKDF2-SHA256 (200,000 iterations).
+
+---
+
+## Tech stack
+
+| Area | Technology |
+|---|---|
+| Language | Python 3.10+ |
+| UI | Streamlit |
+| Database | PostgreSQL (psycopg2) |
+| AI | Google Gemini (`google-genai`) |
+| Testing | pytest |
+
+---
+
+## Getting started (Windows)
+
+### Prerequisites
+- Python 3.10 or later on your PATH
+- A [Google Gemini API key](https://aistudio.google.com/apikey)
+- Windows 10/11, for the one-click scripts. On other systems, follow the manual steps below.
+
+### 1. Install and start the app
+Double-click **`run_app.bat`**, or run it from PowerShell:
+
+```powershell
+.\run_app.bat
+```
+
+The first run:
+1. creates a `.venv` virtual environment;
+2. installs `requirements.txt`;
+3. runs a preflight check;
+4. starts the app at **http://localhost:8501**.
+
+### 2. Set up the database (one time)
+Double-click **`setup_database.bat`**. It:
+1. installs **PostgreSQL 17** if it isn't installed. It downloads the official installer, verifies its SHA-256 against the winget manifest, and asks for administrator permission once;
+2. writes the database settings to `.env`, with a randomly generated local password;
+3. creates all tables and loads the demo data and accounts;
+4. runs the preflight check.
+
+It is safe to run again: existing settings and data are kept. The full output is saved to `setup.log`.
+
+### 3. Add your Gemini key
+Open `.env` and paste your key:
+
+```env
+GEMINI_API_KEY=your_key_here
+```
+
+Then restart the app.
+
+### Configuration reference (`.env`)
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `GEMINI_API_KEY` | Gemini API key (required for AI reading) | none |
+| `MODEL` | Primary Gemini model | `gemini-3.5-flash-lite` |
+| `FALLBACK_MODELS` | Comma-separated backup models | none |
+| `MAX_ATTEMPTS` | Retries per model | `2` |
+| `DB_NAME` / `DB_USER` / `DB_PASSWORD` | PostgreSQL database and credentials | `invoice_db` / `postgres` / none |
+| `DB_HOST` / `DB_PORT` | PostgreSQL server | `localhost` / `5432` |
+
+> `.env` is listed in `.gitignore`. Never commit it.
+
+### Manual setup (any OS)
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate    macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+
+# create .env with the variables above, with PostgreSQL running, then:
+python db_setup.py            # creates the database and core tables
+python setup_agent_tables.py  # agent, approval and payment tables
+python seed_users.py          # demo accounts
+python seed_db.py             # demo vendors, POs and GRNs
+python check_setup.py         # preflight check
+
+python -m streamlit run app.py
+```
+
+---
+
+## Running the demo
+
+Reset to a clean state and start the app:
+
+```powershell
+.\reset_and_start_demo.bat
+```
+
+This stops any running copy, clears approvals, payments, the activity log and uploaded copies, then starts the app. Demo accounts and seed data are kept.
+
+### Demo accounts
+
+| Role | Username |
+|---|---|
+| Vendor | `vendor1` |
+| Procurement Officer | `procurement1` |
+| Department Head | `depthead1` |
+| Finance Officer | `finance1` |
+| Final Approver | `approver1` |
+| Admin | `admin1` |
+
+Passwords are in [`seed_users.py`](seed_users.py). They are demo-only; change them before any real use.
+
+### Suggested walkthrough
+1. **Vendor:** upload `demo_test_invoices/clean_match.pdf` and review the AI verification report.
+2. **Vendor:** upload a discrepancy invoice, e.g. `price_mismatch.pdf` or `missing_grn.pdf`, and see the reason codes.
+3. **Vendor:** upload `clean_match.pdf` again; the duplicate is blocked.
+4. **Department Head → Finance Officer → Final Approver:** approve the clean invoice at each stage.
+5. **Final Approver:** the payment window opens. Pay with sandbox card `4111 1111 1111 1111` (any future expiry, any CVV). Press Enter after the CVV, then click Pay.
+6. **Admin:** open the audit log and search for `payment` to see the full trail.
+
+### Demo scenarios
+
+The `demo_test_invoices/` folder contains these test invoices:
+
+| File | Expected result |
+|---|---|
+| `clean_match.pdf` | Passes all checks → ready for approval |
+| `quantity_mismatch.pdf` | Quantity exceeds the PO/GRN |
+| `price_mismatch.pdf` | Unit price differs from the PO |
+| `wrong_vendor.pdf` | Vendor differs from the PO |
+| `wrong_gst.pdf` | GST rate differs from the PO |
+| `missing_grn.pdf` | No goods receipt |
+| `partial_receipt.pdf` | Only part of the order was received |
+| `budget_exceeded.pdf` | Department budget insufficient |
+| `missing_po.pdf` | PO not found |
+
+### Sandbox payment test credentials
+
+| Method | Succeeds | Declined |
+|---|---|---|
+| Card | `4111 1111 1111 1111` | `4000 0000 0000 0002` |
+| UPI | `success@sandbox` | `failure@sandbox` |
+| Net banking | any listed bank | `Sandbox Bank (decline)` |
+
+---
+
+## Testing
+
+```bash
+python rules.py          # 20 deterministic rule cases from the synthetic dataset
+python -m pytest -q      # unit and integration tests
+```
+
+The `dataset/` folder holds 18 synthetic invoice cases with reference data, and a separate `test_manifest.json` of expected outcomes. The expected outcomes are never shown to the AI.
+
+---
+
+## Project structure
+
+```text
+invoice-agent/
+├── app.py                    # Streamlit UI: login, upload, approvals, payment window, audit
+├── agent.py                  # Gemini agent loop with tool calls and retries
+├── agent_tools.py            # Tools the agent can call (read invoice, PO lookup, checks)
+├── extract_invoice.py        # Gemini document extraction and field normalisation
+├── extract_procurement.py    # Reads uploaded PO / GRN documents and checks them before the form is filled
+├── rules.py                  # Deterministic rules engine (reason codes, recommendation)
+├── checks.py                 # Arithmetic and vendor checks
+├── matcher.py                # Three-way matching (invoice / PO / GRN)
+├── approval_workflow.py      # Three-stage approval workflow
+├── payment_gateway.py        # Sandbox payment gateway (UPI / card / net banking)
+├── db_store.py               # Approvals, payment schedules, audit log, vendor messages
+├── auth.py                   # Users and PBKDF2 password hashing
+├── po_pages.py · grn_pages.py · finance_pages.py   # Procurement and finance workspaces
+├── schema.sql · schema_agent.sql                   # Database schema
+├── run_app.bat               # Install and run
+├── setup_database.bat        # One-time PostgreSQL install and setup
+├── reset_and_start_demo.bat  # Clean demo reset and start
+├── dataset/                  # Synthetic invoices, reference data, expected results
+├── demo_test_invoices/       # Demo invoice PDFs
+├── demo_test_documents/      # Sample PO and goods receipt (PDF and PNG) for the upload feature
+├── data/                     # Saved POs, GRNs and invoice readings (JSON)
+└── test_*.py                 # pytest suite
+```
+
+---
+
+## Security and governance
+
+**What the demo enforces**
+- The rules engine owns every recommendation; AI output alone never authorises payment.
+- Three human approvals are required before any payment.
+- Payments are role-restricted, amount-checked and limited to one per approval request.
+- Secrets live only in `.env`, and passwords are stored as salted hashes.
+- Sign-in pauses for 2 minutes after 5 wrong passwords for a username, and gives the same answer for unknown usernames as for known ones.
+- A session signs out after 30 minutes without activity, and signing in or out clears the previous session.
+- Every action is logged to PostgreSQL.
+
+**What production would add**
+- TLS everywhere, and encryption at rest and in transit
+- University single sign-on with multi-factor authentication
+- A secrets vault with key rotation
+- Write-once, tamper-evident audit storage
+- Integration with the real ERP / general ledger and payment provider
+
+> ⚠️ All vendors, purchase orders, budgets and payments in this repository are **synthetic demo data**. The payment gateway is a **sandbox**: it does not contact any bank or move money.
+
+---
+
+## Team
+
+Built for **JKLU AI Buildathon 2026, PS-09: Autonomous Accounts Payable & Vendor Invoice Agent**.
