@@ -1,0 +1,33 @@
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environment
+.venv/
+venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# OS metadata
+Thumbs.db
+.DS_Store
+
+# Temporary backup
+.gitignore_backup
+*.bak
+*.bak2
+
+# IDE
+.vscode/
+
+# Logs
+*.log
+
+#Agent logs 
+agent_log.jsonl
+
+invoices/upload_*
+extracted/upload_*
